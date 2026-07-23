@@ -113,9 +113,8 @@ venv
 .venv
 .venv*
 
-# Data (exclude raw/large data directories; allow bundled manuscript CSVs)
+# Data (exclude raw/large data directories)
 data
-!manuscript/data/
 demo_output
 
 .DS_Store
