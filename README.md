@@ -42,6 +42,16 @@ The sidebar console has four views:
 
 > The hosted app is upload-only (500 MB per file). To analyze larger images, run it locally — see **Run locally from source** below.
 
+### Online vs local: where SAM2 runs
+
+| | Hosted app (Streamlit) | Local GUI (`fibermorph-gui --local`) | Cluster (Run Remote SBATCH script) |
+|---|---|---|---|
+| Cross-section segmentation | watershed only — **SAM2 unavailable** (no GPU on the server) | SAM2 on a machine with an NVIDIA GPU, else watershed | SAM2 on a GPU node (`--use-sam2`), else watershed |
+| Curvature | ✓ | ✓ | ✓ |
+| Input | uploads, 500 MB cap | uploads (5 GB cap) or a folder on disk | a folder on the cluster |
+
+The app checks whether SAM2 can run where it is running (the `sam2` package plus a CUDA GPU). When it can't — always the case on the hosted app — the **Use SAM2 segmentation** switch is turned off and locked, with a one-line reason, and cross-sections are segmented with watershed. To use SAM2, run the GUI locally on a GPU machine (see [SAM2 GPU segmentation](#sam2-gpu-segmentation-optional)) or generate a cluster script in **Run Remote** with SAM2 enabled.
+
 ## 📦 Installation
 
 ### Recommended: Conda + GUI
