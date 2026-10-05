@@ -121,6 +121,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `fibermorph/test/test_data/curv_golden/`.
 
 ### Changed
+- **The GUI says when SAM2 can't run, and where it can.** The Cross-Section
+  "Use SAM2 segmentation" switch could be turned on in the Streamlit-hosted app,
+  which has no GPU, and every image then quietly used watershed. The app now
+  checks for the `sam2` package and a CUDA GPU (`sam2_runtime_status()` in
+  `fibermorph.processing.section_sam2`). When either is missing the switch is
+  off and locked, a warning gives the one-line reason, and it points to **Run
+  Local** (`fibermorph-gui --local` on a GPU machine) and **Run Remote** (a
+  cluster script with SAM2) as the ways to run SAM2. The Run Local and Run
+  Remote views and the README ("Online vs local") now say the same.
 - **The upload cap shown in the GUI is the cap Streamlit enforces.** The sidebar
   status and the Run Local view used to say "500 MB" (hosted) or "5 GB" (local)
   whatever cap was set. They now read Streamlit's `server.maxUploadSize`, so a

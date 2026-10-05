@@ -47,6 +47,22 @@ _MIN_DIAM_MU  = 30.0
 _MAX_DIAM_MU  = 150.0
 
 
+def sam2_runtime_status() -> tuple[bool, str]:
+    """Whether SAM2 can run in this process, and if not, why.
+
+    Returns (True, "") when the sam2 package imports and a CUDA GPU is visible;
+    otherwise (False, reason). The checkpoint file is not checked here.
+    """
+    if not _SAM2_AVAILABLE:
+        return False, "the sam2 package is not installed"
+    try:
+        if not torch.cuda.is_available():  # noqa: F821
+            return False, "no CUDA GPU is available"
+    except Exception as exc:
+        return False, f"the GPU check failed ({type(exc).__name__})"
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # SAM2 generator singleton
 # ---------------------------------------------------------------------------
