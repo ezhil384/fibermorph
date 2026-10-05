@@ -305,14 +305,24 @@ def window_iter(
     output_path : str or pathlib.Path
         Output directory path.
     test : bool
-        Whether this is a test run.
+        Whether this is a validation run. If True, the per-hair table is
+        returned instead of the image summary (one row per hair, with columns
+        ``curv_mean``, ``curv_median`` and ``length`` for a window size, or
+        ``curv`` and ``length`` for the whole-hair mode).
     within_element : bool
         Whether to save within-element data.
 
     Returns
     -------
     pd.DataFrame
-        Summary DataFrame for the image.
+        Summary DataFrame for the image (columns ``ID``, ``curv_mean_mean``,
+        ``curv_mean_median``, ``curv_median_mean``, ``curv_median_median``,
+        ``length_mean``, ``length_median``, ``hair_count``). With
+        ``window_size=None`` (whole hair: one circle fitted to each hair, hairs
+        shorter than 0.5 * ``resolution`` pixels skipped) the columns are
+        ``ID``, ``curv_mean``, ``curv_median``, ``length_mean``,
+        ``length_median`` and ``hair_count``. With ``test=True``, the per-hair
+        table described above.
     """
     from ..utils.filesystem import make_subdirectory
     
@@ -371,85 +381,57 @@ def window_iter(
             }
         )
 
-        return im_sumdf
+        if test:
+            return within_im_curvdf2
+        else:
+            return im_sumdf
 
-    else:
-        logger.warning("Window size is None, returning empty DataFrame")
-        return pd.DataFrame()
+    elif window_size is None:
+        # Whole-hair mode: fit a single Taubin circle to each hair.
+        window_size_px = None
+        within_element = None
+        minsize = 0.5 * resolution
+        tempdf = [
+            analyze_each_curv(
+                hair, window_size_px, resolution, output_path, name, within_element
+            )
+            for hair in props
+            if hair.area > minsize
+        ]
 
+        if tempdf:
+            within_im_curvdf = pd.concat(tempdf)
+        else:
+            # No hair longer than minsize: report an empty table (NaN means,
+            # hair_count 0), as the window-size branch does, instead of
+            # letting pd.concat raise "No objects to concatenate".
+            within_im_curvdf = pd.DataFrame(columns=["curv", "length"], dtype=float)
 
-# ---------------------------------------------------------------------------
-# New extended metrics: curl index, wave count, arc-length from coords
-# ---------------------------------------------------------------------------
+        within_im_curvdf2 = within_im_curvdf.dropna()
 
-def pixel_length_correction_coords(coords: np.ndarray) -> float:
-    """Compute arc length of an ordered pixel path via Euclidean inter-pixel distances.
+        output_path = make_subdirectory(output_path, append_name="analysis")
+        save_path = pathlib.Path(output_path) / f"ImageSum_{name}.csv"
+        within_im_curvdf2.to_csv(save_path)
+        logger.debug(f"Saved image summary to {save_path}")
 
-    Accepts coordinate arrays (N, 2) directly, unlike the regionprops-based
-    pixel_length_correction in processing/geometry.py.
-    """
-    pts = np.asarray(coords, dtype=np.float64)
-    if len(pts) < 2:
-        return float(len(pts))
-    diffs = np.diff(pts, axis=0)
-    return float(np.sum(np.linalg.norm(diffs, axis=1)))
+        im_mean = within_im_curvdf2["curv"].mean()
+        im_median = within_im_curvdf2["curv"].median()
+        length_mean = within_im_curvdf2["length"].mean()
+        length_median = within_im_curvdf2["length"].median()
+        hair_count = len(within_im_curvdf2.index)
 
+        im_sumdf = pd.DataFrame(
+            {
+                "ID": name,
+                "curv_mean": [im_mean],
+                "curv_median": [im_median],
+                "length_mean": [length_mean],
+                "length_median": [length_median],
+                "hair_count": [hair_count],
+            }
+        )
 
-def curl_index_from_skeleton(skel: np.ndarray, resolution_mm: float):
-    """Compute mean and std curl index (chord/arc ratio) across skeleton elements.
-
-    Parameters
-    ----------
-    skel         : 2D bool/uint8 skeleton image
-    resolution_mm: pixels per mm
-
-    Returns
-    -------
-    (curl_index_mean, curl_index_std, element_lengths_mm)
-    """
-    from scipy.ndimage import label as ndlabel
-    from skimage.measure import regionprops as sk_regionprops
-
-    labeled, _ = ndlabel(skel > 0)
-    props = sk_regionprops(labeled)
-
-    curl_vals = []
-    len_vals  = []
-    for region in props:
-        coords = region.coords
-        if len(coords) < 2:
-            continue
-        arc = pixel_length_correction_coords(coords) / resolution_mm
-        r0, c0 = coords[0]
-        r1, c1 = coords[-1]
-        chord = np.sqrt((r1 - r0) ** 2 + (c1 - c0) ** 2) / resolution_mm
-        if arc > 0:
-            curl_vals.append(chord / arc)
-            len_vals.append(arc)
-
-    if not curl_vals:
-        return float("nan"), float("nan"), []
-    return float(np.mean(curl_vals)), float(np.std(curl_vals)), len_vals
-
-
-def wave_count(curv_values: np.ndarray) -> int:
-    """Count peaks in a curvature trace using 10% mean prominence threshold.
-
-    Parameters
-    ----------
-    curv_values : array-like of curvature values (mm⁻¹)
-
-    Returns
-    -------
-    int — number of detected wave peaks
-    """
-    from scipy.signal import find_peaks as _find_peaks
-
-    arr = np.asarray(curv_values, dtype=np.float64)
-    if len(arr) < 3:
-        return 0
-    mean_val = float(np.nanmean(arr))
-    if mean_val == 0:
-        return 0
-    peaks, _ = _find_peaks(arr, prominence=mean_val * 0.10, distance=3)
-    return int(len(peaks))
+        if test:
+            return within_im_curvdf2
+        else:
+            return im_sumdf

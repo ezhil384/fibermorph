@@ -11,9 +11,8 @@ fibermorph provides powerful image analysis tools for studying fiber curvature a
 - **Streamlit GUI** with a sidebar console: **Cross-Section**, **Curvature**, **Run Local**, and **Run Remote** views
 - **Per-fragment curvature** in the GUI — each fiber fragment's length and curvature, plus per-image summaries and distribution histograms
 - **Flexible resolution units** — enter px/µm or µm/px (px/mm or mm/px) in the GUI or CLI and it converts for you
-- **Run locally for large images** — `fibermorph-gui` raises the upload cap and adds a "Folder on disk" input (read images straight from disk)
+- **Run locally for large images** — `fibermorph-gui --local` raises the upload cap to 5 GB and adds a "Folder on disk" input (read images straight from disk)
 - **SAM2 GPU segmentation** for cross-sections (optional; falls back to watershed on CPU), with extended shape features (`--extended-features`)
-- **CLAHE preprocessing** for curvature images with uneven illumination (`--use-clahe`)
 - **SBATCH script generation** from the GUI's Run Remote view (build & download — you submit it yourself)
 - **GPU Docker target** for container deployment with SAM2
 
@@ -29,9 +28,11 @@ conda activate fibermorph_env
 # Install fibermorph with the GUI
 pip install "fibermorph[gui]"
 
-# Launch the interactive GUI
-fibermorph-gui
+# Launch the interactive GUI on your own machine
+fibermorph-gui --local
 ```
+
+> `fibermorph-gui` without `--local` starts the app in *hosted* mode (uploads only, 500 MB cap, no access to folders on the computer running it). Use `--local` when you run it on your own machine; see [Run locally from source](#-run-locally-from-source).
 
 The sidebar console has four views:
 - **Cross-Section**: upload images, segment (SAM2 / watershed) and measure cross-section shape — results and mask previews appear inline
@@ -40,6 +41,16 @@ The sidebar console has four views:
 - **Run Remote**: build a downloadable SBATCH script to run the CLI on an HPC cluster (it does not submit jobs for you)
 
 > The hosted app is upload-only (500 MB per file). To analyze larger images, run it locally — see **Run locally from source** below.
+
+### Online vs local: where SAM2 runs
+
+| | Hosted app (Streamlit) | Local GUI (`fibermorph-gui --local`) | Cluster (Run Remote SBATCH script) |
+|---|---|---|---|
+| Cross-section segmentation | watershed only — **SAM2 unavailable** (no GPU on the server) | SAM2 on a machine with an NVIDIA GPU, else watershed | SAM2 on a GPU node (`--use-sam2`), else watershed |
+| Curvature | ✓ | ✓ | ✓ |
+| Input | uploads, 500 MB cap | uploads (5 GB cap) or a folder on disk | a folder on the cluster |
+
+The app checks whether SAM2 can run where it is running (the `sam2` package plus a CUDA GPU). When it can't — always the case on the hosted app — the **Use SAM2 segmentation** switch is turned off and locked, with a one-line reason, and cross-sections are segmented with watershed. To use SAM2, run the GUI locally on a GPU machine (see [SAM2 GPU segmentation](#sam2-gpu-segmentation-optional)) or generate a cluster script in **Run Remote** with SAM2 enabled.
 
 ## 📦 Installation
 
@@ -100,14 +111,45 @@ git clone https://github.com/lasisilab/fibermorph.git
 cd fibermorph
 python3.12 -m venv .venv && source .venv/bin/activate   # Python 3.10–3.12
 pip install -e '.[gui]'        # editable install of this working copy
-fibermorph-gui                 # opens the local GUI at http://localhost:8501
+fibermorph-gui --local         # opens the local GUI at http://localhost:8501
 ```
 
-Launched this way, the GUI runs on your own machine with the upload cap raised to
-**5 GB** and a **"Folder on disk"** input on the Cross-Section and Curvature views,
-so you can analyze images that are too large to upload to the hosted app. (On a
-machine's first-ever Streamlit run it may briefly ask for an email — the launcher
-skips that for you.)
+Launched with `--local`, the GUI runs on your own machine with the upload cap raised
+to **5 GB**, a **"Folder on disk"** input on the Cross-Section and Curvature views,
+and an editable SAM2 checkpoint path, so you can analyze images that are too large to
+upload to the hosted app. Local mode listens on `localhost` only. (On a machine's
+first-ever Streamlit run it may briefly ask for an email — the launcher skips that
+for you.)
+
+> **`--local` is for your own computer, not for servers.** Plain `fibermorph-gui`
+> (no flag) starts the app in hosted mode: uploads only, a 500 MB upload cap, no
+> "Folder on disk" input, and the SAM2 checkpoint is whatever the server is
+> configured with (the file named by `SAM2_CHECKPOINT`; fibermorph does not ship
+> one). Visitors
+> cannot change it, and its path is not shown in any view. Local mode lets anyone
+> who can open the page read folders on the machine it runs on, so don't expose it
+> on a shared server. Setting the environment
+> variable `FIBERMORPH_LOCAL=1` is equivalent to passing `--local`.
+>
+> Any other arguments to `fibermorph-gui` are passed through to `streamlit run` after
+> the launcher's own options, so they can override them, for example
+> `fibermorph-gui --local --server.port 8600`. How the launcher's options interact
+> with Streamlit's other settings:
+>
+> - `--server.maxUploadSize` (500 MB hosted, 5000 MB local) is passed on the command
+>   line, which outranks `.streamlit/config.toml`. If the environment variable
+>   `STREAMLIT_SERVER_MAX_UPLOAD_SIZE` is set, the launcher passes nothing and that
+>   value is used. To change the cap otherwise, add e.g. `--server.maxUploadSize 200`.
+>   The cap the app shows in its sidebar and Run Local view is read from Streamlit's
+>   own setting, so it follows whichever of these you use (500 MB and 5 GB are only
+>   the launcher's defaults).
+> - In local mode `--server.address localhost` is always passed, so
+>   `STREAMLIT_SERVER_ADDRESS` and `config.toml` cannot open folder input to other
+>   machines by accident. To listen elsewhere, add `--server.address <address>` to
+>   the command (the launcher then prints a warning; an empty `--server.address=`
+>   also counts, because Streamlit then listens on every interface).
+> - Hosted mode passes no address or port, so Streamlit's usual settings
+>   (`STREAMLIT_SERVER_ADDRESS`, `STREAMLIT_SERVER_PORT`, `config.toml`) apply.
 
 The CLI works from the same checkout too: `fibermorph --help`.
 
@@ -140,27 +182,19 @@ fibermorph --demo_real_section --output_directory ~/fibermorph_demo_section
 ### Curvature analysis
 
 ```bash
-# Basic (same as v1):
 fibermorph --curvature \
   --input_directory /path/to/images \
   --output_directory /path/to/results \
   --resolution_mm 132 \
-  --jobs 4
-
-# With new v2 options:
-fibermorph --curvature \
-  --input_directory /path/to/images \
-  --output_directory /path/to/results \
-  --resolution_mm 132 \
-  --use-clahe \
-  --extended-curvature \
   --jobs 4
 ```
 
-New curvature flags:
-- `--use-clahe` — CLAHE contrast enhancement before the Frangi ridge filter
-- `--extended-curvature` — adds `curl_index`, `curl_index_std`, `wave_count`, `wave_count_per_mm`, and `length_total` columns (experimental — from the v2 fork; validate before relying on them)
+Curvature analysis uses the published fibermorph method (v0.3.1) and has no alternative processing modes. Its ridge filter is the scikit-image 0.16.2 Frangi filter bundled with fibermorph, so that step gives the published result whichever scikit-image version is installed.
+
+New curvature flag:
 - `--resolution_mm_units {px_per_mm,mm_per_px}` — interpret `--resolution_mm` as pixels-per-mm (default) or mm-per-pixel
+
+Two options from earlier v2.0 development builds, `--use-clahe` (CLAHE contrast enhancement) and `--extended-curvature` (curl index, wave count, medial-axis skeleton), have been removed because they are not part of the published method. They no longer appear in `--help`, and a command that still passes either one stops with an error (exit code 2) that says so; delete the flag from the command (or from an older generated SBATCH script) to run the published method.
 
 ### Section analysis
 
@@ -226,14 +260,22 @@ To run the demo, you will input something like:
 ### Curvature
 To calculate curvature from grayscale TIFF images of fibers, the flag `--curvature` is used with the following flags in addition to input and output directories:
 ```
---resolution_mm       	Integer. Number of pixels per mm for
+--resolution_mm       	Float. Number of pixels per mm for
 						curvature analysis.
-						Default is 132.
+						Default is 132. Must be greater than 0.
 --window_size  [ ...] 	Float or integer or None. Desired size for
 						window of measurement
 						for curvature analysis in pixels or mm (given
-						the flag --window_unit). If nothing is entered, the default
-						is None and the entire fiber will be used to for the curve fitting."
+						the flag --window_unit). Give several values
+						(e.g. 25 50 100) to measure each window size in turn.
+						With px each value must be a whole number (50 or 50.0);
+						with mm it can be any number greater than 0 (0.5).
+						A window shorter than 10 pixels (for mm, after conversion
+						with --resolution_mm) is not used: each fiber is measured
+						over its whole length in one window, with a warning.
+						A window longer than 1,000,000,000 pixels is refused.
+						If nothing is entered, or the value is 'none', the default
+						is None and the entire fiber will be used for the curve fitting.
 --window_unit {px,mm}	String. Unit of measurement for window of
 						measurement for curvature
                       	analysis. Can be 'px' (pixels) or 'mm'. Default is 'px'.
@@ -256,8 +298,11 @@ fibermorph --curvature --input_directory /Users/<UserName>/<ImageFolderPath> --o
 To calculate cross-sectional properties from grayscale TIFF images of fibers, the flag `--section` is used with the following flags:
 ```
 --resolution_mu       Float. Number of pixels per micron for section analysis. Default is 4.25.
+                      Must be greater than 0.
 --minsize             Integer. Minimum diameter in microns for sections. Default is 20.
+                      Must be 0 or more and no larger than --maxsize.
 --maxsize             Integer. Maximum diameter in microns for sections. Default is 150.
+                      Must be greater than 0.
 
 ```
 
@@ -282,3 +327,6 @@ A user could enter, for example:
 ```
 fibermorph --raw2gray --input_directory /Users/<UserName>/<ImageFolderPath> --output_directory /Users/<UserName>/<ExistingPath>/<NewFolderName> --file_extension .RW2 --jobs 4
 ```
+
+### Checks on numeric options
+Before any image is read, fibermorph checks the numeric options, whichever module is run, and stops with a usage message (exit code 2) if one is out of range: `--jobs` must not be 0 (use a positive number, or -1 for every CPU), and a number larger than the machine's CPU count is reduced to it with a message; `--resolution_mm` and `--resolution_mu` must be finite and greater than 0; `--minsize` must be 0 or more, `--maxsize` greater than 0, and `--minsize` no larger than `--maxsize`; and `--window_size` follows the rules listed under Curvature.

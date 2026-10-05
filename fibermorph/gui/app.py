@@ -11,8 +11,8 @@ Four tabs:
 
   Run Local        — how to install and launch this same GUI on your own
                      machine (no upload limit; read images straight from a
-                     folder on disk). Those extra options appear automatically
-                     when launched via `fibermorph-gui`.
+                     folder on disk). Those extra options appear only when
+                     launched via `fibermorph-gui --local`.
 
   Run Remote       — documentation + an SBATCH script scaffold for running the
                      fibermorph CLI on an HPC cluster. It generates a script to
@@ -20,7 +20,10 @@ Four tabs:
                      or connect to any cluster.
 
 Start via:
-  fibermorph-gui
+  fibermorph-gui            # hosted mode: uploads only, 500 MB default cap
+  fibermorph-gui --local    # local mode: folder input, 5 GB default cap, localhost only
+  # (the cap shown in the app is Streamlit's server.maxUploadSize, so it follows
+  # STREAMLIT_SERVER_MAX_UPLOAD_SIZE or --server.maxUploadSize if you set one)
   # or directly:
   python -m streamlit run fibermorph/gui/app.py --server.port 8501
 """
@@ -35,7 +38,7 @@ import pandas as pd
 import streamlit as st
 
 from fibermorph.utils.units import resolution_to_px_per_unit
-from fibermorph.gui import styles
+from fibermorph.gui import inputs, styles
 
 # ---------------------------------------------------------------------------
 # Page config — must be the first Streamlit call
@@ -99,11 +102,17 @@ def _process_section_gui(
     use_sam2: bool,
     sam2_checkpoint: str,
     return_mask: bool = False,
+    display_name: str | None = None,
 ):
     """Run section analysis on a single image.
 
     Returns dict of measurements, or (dict, gray_img, mask_uint8) when
     return_mask=True. Returns None if no cross-section was detected.
+
+    display_name is the image's name as the user knows it (for an upload, the
+    uploaded filename, not the generated name of the temporary file). It is
+    recorded in the result's ID and mask_filename fields; it defaults to the
+    basename of tmp_path.
     """
     import cv2
     from fibermorph.processing.section_sam2 import segment_section
@@ -135,7 +144,9 @@ def _process_section_gui(
 
     mask_uint8, confidence, method = seg_result
 
-    df = section_props_extended(mask_uint8, os.path.basename(tmp_path), resolution_mu)
+    df = section_props_extended(
+        mask_uint8, display_name or os.path.basename(tmp_path), resolution_mu
+    )
     if df is None or df.empty:
         return None
 
@@ -152,12 +163,10 @@ def _process_curvature_gui(
     tmp_path: str,
     resolution_mm: float,
     window_size: int,
-    use_clahe: bool = False,
-    extended: bool = False,
 ):
     """Run curvature analysis on a single image.
 
-    Returns a dict {"fragments": DataFrame|None, "image_row": dict} or None.
+    Returns the per-fragment DataFrame, or None if nothing was measured.
 
     The pipeline detects each connected fiber fragment, measures its length and
     curvature, and writes that per-fragment table to analysis/ImageSum_<name>.csv
@@ -179,12 +188,9 @@ def _process_curvature_gui(
             save_img=False,
             test=False,
             within_element=False,
-            use_clahe=use_clahe,
-            extended_curvature=extended,
         )
         if df is None or (hasattr(df, "empty") and df.empty):
             return None
-        image_row = df.iloc[0].to_dict() if hasattr(df, "iloc") else {}
 
         fragments = None
         matches = glob.glob(os.path.join(out_dir, "**", "ImageSum_*.csv"),
@@ -198,7 +204,7 @@ def _process_curvature_gui(
                 fdf.insert(0, "fragment", range(1, len(fdf) + 1))
                 fragments = fdf
 
-    return {"fragments": fragments, "image_row": image_row}
+    return fragments
 
 
 def _warn_duplicate_names(names):
@@ -213,10 +219,43 @@ def _warn_duplicate_names(names):
 
 # ---------------------------------------------------------------------------
 # Local mode: read images straight from a folder on disk (no upload, no size
-# cap). Only offered when the app was launched via `fibermorph-gui` on the
-# user's own machine — the hosted cloud app stays upload-only.
+# cap). Only offered when the app was launched with `fibermorph-gui --local`
+# (which sets FIBERMORPH_LOCAL=1) on the user's own machine — a hosted app stays
+# upload-only, because local mode lets every visitor read folders on the server.
 # ---------------------------------------------------------------------------
 _LOCAL = os.environ.get("FIBERMORPH_LOCAL") == "1"
+
+
+def _sam2_status() -> tuple[bool, str]:
+    """(can SAM2 run in this app, reason if not). See sam2_runtime_status."""
+    from fibermorph.processing import section_sam2
+    return section_sam2.sam2_runtime_status()
+
+
+# Shown wherever SAM2 is unavailable in this app, so users know where it does run.
+_SAM2_ELSEWHERE = (
+    "To segment with SAM2, run the app on a machine with a GPU (**Run Local**, "
+    "`fibermorph-gui --local`) or generate a cluster script with SAM2 enabled "
+    "(**Run Remote**)."
+)
+
+
+def _upload_cap() -> str:
+    """The upload cap Streamlit is enforcing, as text for the page ("500 MB",
+    "5 GB").
+
+    Read from Streamlit's own setting, so it follows whatever the host chose
+    (the launcher's default, STREAMLIT_SERVER_MAX_UPLOAD_SIZE,
+    --server.maxUploadSize or config.toml) and always matches the limit the
+    file uploader shows.
+    """
+    try:
+        return inputs.format_upload_cap(st.get_option("server.maxUploadSize"))
+    except (TypeError, ValueError):
+        return inputs.format_upload_cap(5000 if _LOCAL else 500)
+
+
+_UPLOAD_CAP = _upload_cap()
 
 
 def _list_folder_images(folder):
@@ -265,18 +304,13 @@ def _gather_inputs(source, tmpdir):
     """Turn a picker result into a list of (display_name, filepath).
 
     Folder mode reads paths directly from disk; upload mode persists each
-    uploaded file into tmpdir first.
+    uploaded file into tmpdir first, under a generated name (the client's
+    filename is only used as the display name — see fibermorph.gui.inputs).
     """
     mode, payload = source
     if mode == "folder":
         return [(os.path.basename(p), p) for p in _list_folder_images(payload)]
-    out = []
-    for up in payload or []:
-        p = os.path.join(tmpdir, up.name)
-        with open(p, "wb") as fh:
-            fh.write(up.read())
-        out.append((up.name, p))
-    return out
+    return inputs.save_uploads(payload, tmpdir)
 
 
 def _source_is_empty(source):
@@ -379,7 +413,7 @@ _FILENAME_NOTE = (
     "at a time and does no grouping — name your files however you'll want to group "
     "them (within/between individual) in your own downstream analysis."
 )
-_UPLOAD_TYPES = ["tif", "tiff", "png", "jpg", "jpeg"]
+_UPLOAD_TYPES = inputs.UPLOAD_TYPES
 
 # ---------------------------------------------------------------------------
 # Sidebar: brand + navigation + status (replaces the top tab bar)
@@ -399,8 +433,8 @@ with st.sidebar:
                          type="primary" if _active else "secondary"):
                 st.session_state.active_view = _key
                 st.rerun()
-    _status = ("Local · 5 GB cap · folder input" if _LOCAL
-               else "Hosted · 500 MB upload cap")
+    _status = (f"Local · {_UPLOAD_CAP} cap · folder input" if _LOCAL
+               else f"Hosted · {_UPLOAD_CAP} upload cap")
     st.markdown(styles.footer_html(_status, "v2.0 · SAM2 + watershed"),
                 unsafe_allow_html=True)
 
@@ -422,6 +456,15 @@ if _view == "section":
         "upload, run this app locally (see **Run Local**); for a whole study on a "
         "cluster, see **Run Remote**."
     )
+    _sam2_ok, _sam2_reason = _sam2_status()
+    if not _sam2_ok:
+        # SAM2 cannot run here (e.g. the Streamlit-hosted app has no GPU): say so
+        # up front instead of letting it fall back to watershed unannounced.
+        _where = "this hosted app" if not _LOCAL else "this machine"
+        st.warning(
+            f"**SAM2 is unavailable on {_where}** ({_sam2_reason}); cross-sections "
+            "are segmented with watershed. " + _SAM2_ELSEWHERE
+        )
     st.caption(_FILENAME_NOTE)
 
     sec_source = _render_input_picker("cross-section", "sec")
@@ -437,8 +480,28 @@ if _view == "section":
         sec_max_d    = c4.number_input("Max diameter (µm)", value=150.0, step=1.0, key="sec_max_d")
         sec_res_mu   = resolution_to_px_per_unit(sec_res_val, sec_res_unit)
         st.caption(f"Working resolution: **{sec_res_mu:.4g} px/µm**")
-        sec_sam2     = st.toggle("Use SAM2 segmentation (GPU required)", value=False, key="sec_sam2")
-        sec_ckpt     = st.text_input("SAM2 checkpoint path", value=_DEFAULT_CHECKPOINT, key="sec_ckpt")
+        sec_sam2     = st.toggle(
+            "Use SAM2 segmentation (GPU required)", value=False, key="sec_sam2",
+            disabled=not _sam2_ok,
+            help=None if _sam2_ok else f"Unavailable here: {_sam2_reason}.")
+        if not _sam2_ok:
+            # Locked off; the warning above says why and where SAM2 does run.
+            sec_sam2 = False
+            sec_ckpt = _DEFAULT_CHECKPOINT
+        elif _LOCAL:
+            sec_ckpt = st.text_input("SAM2 checkpoint path", value=_DEFAULT_CHECKPOINT, key="sec_ckpt")
+        else:
+            # Hosted: visitors must not choose which file the server loads as a
+            # model, so use the server-configured checkpoint and don't show its path.
+            sec_ckpt = _DEFAULT_CHECKPOINT
+            # Reached only when the sam2 package and a CUDA GPU are present, so
+            # the checkpoint file is the one thing left to report on.
+            st.caption(
+                "SAM2 checkpoint: file found on this server."
+                if os.path.isfile(sec_ckpt) else
+                "SAM2 checkpoint: no file found on this server, so SAM2 "
+                "segmentation falls back to watershed."
+            )
 
     if st.button("▶ Analyze cross-sections", type="primary", key="sec_run"):
         if _source_is_empty(sec_source):
@@ -464,9 +527,10 @@ if _view == "section":
                             use_sam2=bool(sec_sam2),
                             sam2_checkpoint=str(sec_ckpt),
                             return_mask=True,
+                            display_name=name,
                         )
                     except Exception as e:
-                        st.warning(f"{name}: {e}")
+                        st.warning(f"{name}: {inputs.restore_names(e, path, name)}")
                         out = None
 
                     if out is not None:
@@ -613,7 +677,7 @@ elif _view == "curvature":
     curv_source = _render_input_picker("curvature", "curv")
 
     with st.expander("Settings", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         curv_res_val  = c1.number_input(
             "Resolution", value=132.0, step=1.0, min_value=0.0001, key="curv_res_val",
             help="Enter your scale in whichever unit you have; pick the matching "
@@ -625,18 +689,8 @@ elif _view == "curvature":
                  "to the fiber (Taubin method) and measure local curvature at each "
                  "step along it. Larger = smoother, more global curvature; smaller "
                  "= more local detail. Keep it well below your fragment length.")
-        curv_clahe    = c4.toggle(
-            "CLAHE preprocessing", value=False, key="curv_clahe",
-            help="Contrast-Limited Adaptive Histogram Equalization: boosts local "
-                 "contrast before fibers are detected. Helps when illumination is "
-                 "uneven across the image; may add noise on already-clean images.")
         curv_res_mm   = resolution_to_px_per_unit(curv_res_val, curv_res_unit)
         st.caption(f"Working resolution: **{curv_res_mm:.4g} px/mm**")
-        curv_ext = st.toggle(
-            "Show extended (experimental) metrics", value=False, key="curv_ext",
-            help="Curl index and wave count. These were added in the v2 student "
-                 "fork and are NOT part of the published fibermorph curvature "
-                 "method — treat them as experimental.")
 
     if st.button("▶ Analyze curvature", type="primary", key="curv_run"):
         if _source_is_empty(curv_source):
@@ -653,18 +707,15 @@ elif _view == "curvature":
                     progress.progress(idx / len(curv_inputs),
                                       text=f"Processing {name}…")
                     try:
-                        result = _process_curvature_gui(
+                        frags = _process_curvature_gui(
                             path,
                             resolution_mm=float(curv_res_mm),
                             window_size=int(curv_window),
-                            use_clahe=bool(curv_clahe),
-                            extended=bool(curv_ext),
                         )
                     except Exception as e:
-                        st.warning(f"{name}: {e}")
-                        result = None
+                        st.warning(f"{name}: {inputs.restore_names(e, path, name)}")
+                        frags = None
 
-                    frags = result.get("fragments") if result else None
                     if frags is not None and not frags.empty:
                         f = frags.copy()
                         f.insert(0, "source_file", name)
@@ -678,12 +729,6 @@ elif _view == "curvature":
                             "length_median": float(frags["length"].median()),
                             "length_total":  float(frags["length"].sum()),
                         }
-                        if curv_ext:
-                            ir = (result or {}).get("image_row", {}) or {}
-                            for k in ("curl_index", "wave_count",
-                                      "wave_count_per_mm"):
-                                if k in ir:
-                                    summ[k] = ir[k]
                         summ_rows.append(summ)
                     else:
                         failed.append(name)
@@ -761,13 +806,10 @@ elif _view == "curvature":
                 "length_mean":       "Mean Length (mm)",
                 "length_median":     "Median Length (mm)",
                 "length_total":      "Total Length (mm)",
-                "curl_index":        "Curl Index (v2)",
-                "wave_count":        "Wave Count (v2)",
-                "wave_count_per_mm": "Waves/mm (v2)",
             }
             spresent = {k: v for k, v in summ_labels.items() if k in summ_df.columns}
             fmt = {v: "{:.4f}" for k, v in spresent.items()
-                   if k not in ("source_file", "n_fragments", "wave_count")}
+                   if k not in ("source_file", "n_fragments")}
             st.dataframe(
                 summ_df[list(spresent.keys())].rename(columns=spresent).style.format(fmt),
                 use_container_width=True,
@@ -814,37 +856,56 @@ elif _view == "local":
         "size cap, and you can read straight from a folder on disk.",
     ), unsafe_allow_html=True)
     st.markdown(
-        "**Why:** this hosted app runs on a shared server, so it can't reach files "
-        "on your computer and it caps uploads (500 MB here). Large scans — like a "
-        "2 GB curvature image — won't upload.\n\n"
+        "**Why:** a hosted copy of this app runs on a shared server, so it can't reach "
+        "files on your computer and it caps uploads"
+        + ("" if _LOCAL else f" ({_UPLOAD_CAP} here)")
+        + ", so a larger scan — a multi-gigabyte curvature image, say — won't "
+        "upload.\n\n"
         "**Fix:** fibermorph is an ordinary Python package, and this whole interface "
         "ships with it. Install it once and launch the *same* app on your own "
-        "machine — Streamlit runs perfectly well locally — where there's no upload "
-        "limit and you can point it straight at a folder of images:\n\n"
+        "machine — Streamlit runs perfectly well locally — where you can point it "
+        "straight at a folder of images, with nothing to upload:\n\n"
         "```bash\n"
         "pip install 'fibermorph[gui]'\n"
-        "fibermorph-gui\n"
+        "fibermorph-gui --local\n"
         "```\n\n"
         "That opens the identical interface in your browser at "
         "`http://localhost:8501`, but running on your computer. On the "
         "**Cross-Section** and **Curvature** tabs you then get an extra "
         "**“Folder on disk”** option — choose it, paste the path to your images, and "
-        "they are read directly from disk (no upload, any size)."
+        "they are read directly from disk (no upload, any size).\n\n"
+        "The `--local` flag matters: plain `fibermorph-gui` starts the app in hosted "
+        "mode (uploads only, no folder input). Local mode lets anyone who can open the "
+        "page read folders on the machine it runs on, so it listens on localhost "
+        "only — don't use it on a shared server."
     )
     if _LOCAL:
         st.success(
             "✅ You're running locally right now — the **Folder on disk** option is "
             "available on the Cross-Section and Curvature tabs, and uploads are "
-            "raised to 5 GB."
+            f"capped at {_UPLOAD_CAP}."
         )
     else:
         st.info(
-            "You're on the hosted app (upload-only, 500 MB). Follow the steps above "
-            "to run locally for large images."
+            f"You're on the hosted app (upload-only, {_UPLOAD_CAP}). Follow the steps above "
+            "(including `fibermorph-gui --local`) to run locally for large images."
         )
     st.caption(
         "No GPU or cluster needed — this runs on an ordinary laptop or desktop. For "
         "a whole study on a shared HPC cluster, see the **Run Remote** tab."
+    )
+    st.markdown(
+        "**SAM2 segmentation** does not run on the hosted app. To use it, run "
+        "`fibermorph-gui --local` on a machine with an NVIDIA GPU after installing "
+        "SAM2 and a checkpoint:\n\n"
+        "```bash\n"
+        "pip install git+https://github.com/facebookresearch/segment-anything-2\n"
+        "wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt\n"
+        "SAM2_CHECKPOINT=$PWD/sam2.1_hiera_tiny.pt fibermorph-gui --local\n"
+        "```\n\n"
+        "Then switch on **Use SAM2 segmentation** on the Cross-Section tab (the "
+        "checkpoint path box there can also be edited). No GPU? Use **Run Remote** "
+        "to run SAM2 on a cluster."
     )
 
 
@@ -909,38 +970,52 @@ elif _view == "remote":
             "Section resolution", value=4.25, step=0.01, min_value=0.0001,
             key="batch_sec_res_val")
         sec_res_unit_b = col2.selectbox("Unit", ["px/µm", "µm/px"], key="batch_sec_res_unit")
-        min_diam       = col3.number_input("Min diameter (µm)", value=30.0,  step=1.0)
-        max_diam       = col4.number_input("Max diameter (µm)", value=150.0, step=1.0)
+        # Lower limits match the fibermorph CLI's checks (--minsize >= 0,
+        # --maxsize > 0), so the generated script never carries a value the CLI
+        # refuses.
+        min_diam       = col3.number_input("Min diameter (µm)", value=30.0,  step=1.0,
+                                           min_value=0.0)
+        max_diam       = col4.number_input("Max diameter (µm)", value=150.0, step=1.0,
+                                           min_value=1.0)
         resolution_mu  = resolution_to_px_per_unit(sec_res_val_b, sec_res_unit_b)
         st.caption(f"Script will pass **--resolution_mu {resolution_mu:.4g}** (px/µm).")
+        if int(min_diam) > int(max_diam):
+            st.warning("Min diameter is larger than Max diameter, so no cross-section "
+                       "could match; fibermorph will refuse this script.")
         use_sam2        = st.toggle("Enable SAM2 segmentation (requires GPU)", value=False)
-        sam2_checkpoint = st.text_input("SAM2 checkpoint path", value=_DEFAULT_CHECKPOINT)
+        st.caption(
+            "SAM2 runs on the cluster's GPU node, so this works even where the app "
+            "itself can't run SAM2. The cluster environment needs the sam2 package "
+            "and a checkpoint file (see the README)."
+        )
+        # This value only goes into the generated script text for another machine.
+        # Hosted: don't pre-fill the server's own checkpoint path (it is not
+        # useful on a cluster and visitors must not see it); leave it empty.
+        sam2_checkpoint = st.text_input(
+            "SAM2 checkpoint path",
+            value=_DEFAULT_CHECKPOINT if _LOCAL else "",
+            placeholder="/path/to/sam2.1_hiera_tiny.pt",
+            help="Path to the SAM2 checkpoint on the machine you'll run on. Left "
+                 "blank, the script uses YOUR_SAM2_CHECKPOINT for you to fill in.",
+        )
         ext_features    = st.toggle(
             "Extended features (EFD, Hu moments, radial profile, shape class)", value=True
         )
 
     with st.expander("Curvature settings", expanded=False):
-        col5, col6, col7, col8 = st.columns(4)
+        col5, col6, col7 = st.columns(3)
         curv_res_val_b  = col5.number_input(
             "Curvature resolution", value=132.0, step=1.0, min_value=0.0001,
             key="batch_curv_res_val")
         curv_res_unit_b = col6.selectbox("Unit", ["px/mm", "mm/px"], key="batch_curv_res_unit")
         window_size     = col7.number_input(
-            "Taubin window (px)", value=50, step=5,
+            "Taubin window (px)", value=50, step=5, min_value=1,
             help="Length (in pixels) of the sliding window used to fit a circle "
                  "to the fiber (Taubin method) and measure local curvature. Larger "
                  "= smoother/more global; smaller = more local detail. Keep it well "
                  "below your fragment length.")
-        use_clahe       = col8.toggle(
-            "CLAHE preprocessing", value=False,
-            help="Contrast-Limited Adaptive Histogram Equalization: boosts local "
-                 "contrast before fibers are detected. Helps with uneven "
-                 "illumination; may add noise on already-clean images.")
         resolution_mm   = resolution_to_px_per_unit(curv_res_val_b, curv_res_unit_b)
         st.caption(f"Script will pass **--resolution_mm {resolution_mm:.4g}** (px/mm).")
-        ext_curvature = st.toggle(
-            "Extended curvature metrics (curl index, wave count)", value=True
-        )
 
     with st.expander("SLURM settings", expanded=False):
         col_a, col_b, col_c = st.columns(3)
@@ -984,9 +1059,10 @@ elif _view == "remote":
                     f"    --jobs {int(slurm_cpus)}",
                 ]
                 if use_sam2:
+                    ckpt_arg = sam2_checkpoint.strip() or "YOUR_SAM2_CHECKPOINT"
                     sec_flags += [
                         "    --use-sam2",
-                        f"    --sam2-checkpoint '{sam2_checkpoint}'",
+                        f"    --sam2-checkpoint '{ckpt_arg}'",
                     ]
                 if ext_features:
                     sec_flags.append("    --extended-features")
@@ -1001,10 +1077,6 @@ elif _view == "remote":
                     f"    --window_size {int(window_size)}",
                     f"    --jobs {int(slurm_cpus)}",
                 ]
-                if use_clahe:
-                    curv_flags.append("    --use-clahe")
-                if ext_curvature:
-                    curv_flags.append("    --extended-curvature")
                 commands.append(" \\\n".join(curv_flags))
 
             directives = [
