@@ -291,7 +291,8 @@ def parse_args(argv=None):
         metavar="",
         default=None,
         help="Required. Full path to and name of desired directory containing "
-        "input files.",
+        "input files. --section and --curvature read TIFF, PNG and JPEG images "
+        "(.tif .tiff .png .jpg .jpeg, any case), including subfolders.",
     )
 
     parser.add_argument(
