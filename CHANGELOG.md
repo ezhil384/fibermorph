@@ -311,6 +311,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with thinner hairs, or an absurdly large `--resolution_mu`) still ends in the
   same `KeyError`; that comes from the section workflow, which is not changed
   here.
+- **An empty or mistyped input folder is a one-line error, not a traceback.**
+  `fibermorph --section` on a folder with no readable images crashed inside
+  pandas ("ValueError: No objects to concatenate"); `--curvature` raised a
+  ValueError with a full traceback that still said "TIFF". Both now exit with
+  `fibermorph: error: No images found in <folder> (subfolders included).
+  fibermorph reads .tif .tiff .png .jpg .jpeg files.` (or "Input folder not
+  found"), before creating an empty timestamped output folder. A section run
+  where no image contains a measurable cross-section now says so instead of
+  crashing.
 
 ### Security
 - **Hosted visitors can no longer choose the SAM2 checkpoint path.** In the
