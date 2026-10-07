@@ -148,6 +148,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each result row records only its `source_file`.
 - `fibermorph-gui` seeds an empty Streamlit credentials file on first run
   (non-destructive) so it does not stall on Streamlit's one-time email prompt.
+- **The command line reads PNG and JPEG as well as TIFF.** `--section` and
+  `--curvature` used to list only `.tif`/`.tiff` files (a leftover from the v1
+  workflow, where `--raw2gray` produced TIFFs first), so a folder of PNG or JPEG
+  images was silently treated as empty, although the GUI accepted those types.
+  The CLI now reads `.tif .tiff .png .jpg .jpeg` in any letter case (`.TIF`,
+  `.JPG` were skipped before too), from the same list the GUI's upload widgets
+  use (`fibermorph.utils.filesystem.IMAGE_EXTENSIONS`). Colour images are
+  converted to grayscale on reading, as before. A lossless PNG gives the same
+  results as the TIFF it was saved from.
 
 ### Removed
 - **Curvature diameter metric** (`diameter_mean_mu`, `diameter_cv`) and its

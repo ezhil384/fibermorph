@@ -258,7 +258,7 @@ To run the demo, you will input something like:
 `fibermorph --demo_real_section --output_directory /Users/<UserName>/<ExistingPath>/<NewFolderName`
 
 ### Curvature
-To calculate curvature from grayscale TIFF images of fibers, the flag `--curvature` is used with the following flags in addition to input and output directories:
+To calculate curvature from images of fibers (TIFF, PNG or JPEG; colour images are converted to grayscale), the flag `--curvature` is used with the following flags in addition to input and output directories:
 ```
 --resolution_mm       	Float. Number of pixels per mm for
 						curvature analysis.
@@ -295,7 +295,7 @@ fibermorph --curvature --input_directory /Users/<UserName>/<ImageFolderPath> --o
 ```
 
 ### Section
-To calculate cross-sectional properties from grayscale TIFF images of fibers, the flag `--section` is used with the following flags:
+To calculate cross-sectional properties from images of fibers (TIFF, PNG or JPEG; colour images are converted to grayscale), the flag `--section` is used with the following flags:
 ```
 --resolution_mu       Float. Number of pixels per micron for section analysis. Default is 4.25.
                       Must be greater than 0.
