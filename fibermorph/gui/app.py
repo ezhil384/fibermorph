@@ -207,6 +207,61 @@ def _process_curvature_gui(
     return fragments
 
 
+def _prepare_curvature_input(path, resolution_mm, window_size, auto_reduce, tmpdir, index):
+    """Shrink one curvature image if it would not fit in memory.
+
+    Curvature analysis needs about 200 MB + 210 MB per megapixel at its peak (the
+    4.4 GB that a 5208 x 3904 scan needs gets the process killed on a login node
+    or a hosted app). When the estimate is more than the memory this process can
+    use, the image is shrunk by the factor that fits, and the resolution (px/mm)
+    and the Taubin window (px) are scaled with it, so the physical scale of the
+    measurement is unchanged. Images that fit are analyzed at full resolution,
+    exactly as before.
+
+    Returns ``(path, resolution_mm, window_size, info)``. ``info`` is None for a
+    full-resolution analysis, else a dict with the scale and sizes. Raises
+    ``ValueError`` (with a message for the user) if even a quarter-size image
+    would not fit.
+    """
+    from PIL import Image
+    from fibermorph.utils import imaging
+
+    try:
+        with Image.open(path) as im:
+            width, height = im.size
+    except Exception:
+        return path, resolution_mm, window_size, None   # let the analysis report it
+
+    need_mb = imaging.curvature_peak_memory_mb(height, width)
+    budget_mb = imaging.memory_budget_mb()
+    scale = imaging.curvature_scale_for_budget(height, width, budget_mb)
+    if scale >= 1.0:
+        return path, resolution_mm, window_size, None
+    if not auto_reduce:
+        st.warning(
+            f"This {width} × {height} px image needs about {need_mb / 1000:.1f} GB of "
+            f"memory and only about {budget_mb / 1000:.1f} GB is available, so the "
+            "analysis will probably be killed. Turn on **Reduce very large images** "
+            "in Settings, or use **Run Local** / **Run Remote** on a machine with more memory."
+        )
+        return path, resolution_mm, window_size, None
+    if scale < imaging.MIN_CURV_SCALE:
+        raise ValueError(
+            f"This {width} × {height} px image needs about {need_mb / 1000:.1f} GB of memory "
+            f"and only about {budget_mb / 1000:.1f} GB is available, so it would have to be "
+            f"shrunk to {scale:.0%} of its size, which is too small to measure curvature. "
+            "Run it with **Run Local** on a machine with more memory, or with **Run Remote**."
+        )
+
+    small_path = os.path.join(tmpdir, f"reduced_{index:04d}.tif")
+    eff, (new_w, new_h) = imaging.write_scaled_copy(path, small_path, scale)
+    return small_path, resolution_mm * eff, max(10, round(window_size * eff)), {
+        "scale": eff, "from_px": (width, height), "to_px": (new_w, new_h),
+        "resolution_mm": resolution_mm * eff, "window_px": max(10, round(window_size * eff)),
+        "need_mb": need_mb, "budget_mb": budget_mb,
+    }
+
+
 def _warn_duplicate_names(names):
     """Warn if any inputs share a filename (ambiguous source_file)."""
     dups = sorted({n for n in names if names.count(n) > 1})
@@ -691,6 +746,20 @@ elif _view == "curvature":
                  "= more local detail. Keep it well below your fragment length.")
         curv_res_mm   = resolution_to_px_per_unit(curv_res_val, curv_res_unit)
         st.caption(f"Working resolution: **{curv_res_mm:.4g} px/mm**")
+        curv_auto_reduce = st.checkbox(
+            "Reduce very large images automatically so they fit in memory",
+            value=True, key="curv_auto_reduce",
+            help="Curvature analysis of a 20-megapixel scan needs about 4.5 GB of memory. "
+                 "If an image needs more than this app can use, it is shrunk just enough to "
+                 "fit, and the resolution and window are scaled with it (the output then says "
+                 "so). Images that fit are never changed. Turn this off to always analyze at "
+                 "full size; the app may then be stopped by the system.")
+        from fibermorph.utils import imaging as _imaging
+        _budget = _imaging.memory_budget_mb()
+        if _budget is not None:
+            _fit_mp = max(_budget - _imaging.CURV_MB_BASE, 0) / _imaging.CURV_MB_PER_MP
+            st.caption(f"Memory this app can use for one image: about **{_budget / 1000:.1f} GB**, "
+                       f"enough for images up to about **{_fit_mp:.1f} megapixels** at full size.")
 
     if st.button("▶ Analyze curvature", type="primary", key="curv_run"):
         if _source_is_empty(curv_source):
@@ -702,23 +771,32 @@ elif _view == "curvature":
                 frag_frames = []
                 summ_rows   = []
                 failed      = []
+                reduced     = {}
                 progress = st.progress(0, text="Processing…")
                 for idx, (name, path) in enumerate(curv_inputs):
                     progress.progress(idx / len(curv_inputs),
                                       text=f"Processing {name}…")
+                    info = None
                     try:
+                        use_path, use_res, use_window, info = _prepare_curvature_input(
+                            path, float(curv_res_mm), int(curv_window),
+                            bool(curv_auto_reduce), tmpdir, idx)
                         frags = _process_curvature_gui(
-                            path,
-                            resolution_mm=float(curv_res_mm),
-                            window_size=int(curv_window),
+                            use_path,
+                            resolution_mm=use_res,
+                            window_size=use_window,
                         )
                     except Exception as e:
                         st.warning(f"{name}: {inputs.restore_names(e, path, name)}")
                         frags = None
+                    if info is not None:
+                        reduced[name] = info
 
                     if frags is not None and not frags.empty:
                         f = frags.copy()
                         f.insert(0, "source_file", name)
+                        if info is not None:
+                            f.insert(1, "analysis_scale", round(info["scale"], 4))
                         frag_frames.append(f)
                         summ = {
                             "source_file":   name,
@@ -729,10 +807,27 @@ elif _view == "curvature":
                             "length_median": float(frags["length"].median()),
                             "length_total":  float(frags["length"].sum()),
                         }
+                        if info is not None:
+                            summ["analysis_scale"] = round(info["scale"], 4)
                         summ_rows.append(summ)
                     else:
                         failed.append(name)
                 progress.progress(1.0, text="Done.")
+
+            if reduced:
+                lines = [
+                    f"- **{n}**: {i['from_px'][0]} × {i['from_px'][1]} px → "
+                    f"{i['to_px'][0]} × {i['to_px'][1]} px (×{i['scale']:.2f}); analyzed at "
+                    f"{i['resolution_mm']:.4g} px/mm with a {i['window_px']} px window"
+                    for n, i in reduced.items()]
+                st.warning(
+                    "**Reduced to fit in memory.** These images needed more memory than this "
+                    f"app can use (about {next(iter(reduced.values()))['budget_mb'] / 1000:.1f} GB), so "
+                    "they were shrunk before analysis. Lengths and curvature are still in mm and "
+                    "mm⁻¹, but thin fibers are measured at lower resolution, so the values can "
+                    "differ from a full-size analysis (the `analysis_scale` column records the "
+                    "factor). For full-resolution results use **Run Local** on a machine with "
+                    "more memory, or **Run Remote**.\n\n" + "\n".join(lines))
 
             if failed:
                 st.warning(

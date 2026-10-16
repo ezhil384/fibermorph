@@ -52,6 +52,24 @@ The sidebar console has four views:
 
 The app checks whether SAM2 can run where it is running (the `sam2` package plus a CUDA GPU). When it can't — always the case on the hosted app — the **Use SAM2 segmentation** switch is turned off and locked, with a one-line reason, and cross-sections are segmented with watershed. To use SAM2, run the GUI locally on a GPU machine (see [SAM2 GPU segmentation](#sam2-gpu-segmentation-optional)) or generate a cluster script in **Run Remote** with SAM2 enabled.
 
+### Large curvature images and memory
+
+Curvature analysis of a 20-megapixel scan (for example 5208 × 3904 px) needs about **4.5 GB of memory** at its
+peak (roughly 200 MB + 210 MB per megapixel), almost all of it in the ridge-filter step. That is more than a
+shared login node (a 4 GiB cap per user on Great Lakes) or a hosted app has, and the system then kills the app
+with no message. The GUI therefore checks the memory it can actually use (the cgroup limit, or the machine's free
+memory) before each curvature image. An image that fits is analyzed at full size, exactly as before. One that does
+not is shrunk just enough to fit, the **resolution (px/mm) and the Taubin window (px) are scaled with it** so
+lengths and curvature stay in mm and mm⁻¹, and the page and the CSVs say so (an `analysis_scale` column, and a
+warning naming each image). Values from a reduced image can differ from a full-size analysis because thin fibers
+are measured at lower resolution; for results that go in a paper, run the full-size image on a machine with
+enough memory (**Run Local** on a compute node, or **Run Remote**). If an image would have to shrink below a
+quarter of its size, it is not analyzed and the message says how much memory it needs.
+
+In **Settings → Curvature** you can turn the reduction off, or set the memory the app may use with the environment
+variable `FIBERMORPH_MAX_MEMORY_MB` (for example on a host that hides its limit). Cross-section images are
+always analyzed at about 2 px/µm, so they need far less memory.
+
 ## 📦 Installation
 
 ### Recommended: Conda + GUI
